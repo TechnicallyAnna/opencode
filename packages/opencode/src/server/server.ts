@@ -49,6 +49,12 @@ globalThis.AI_SDK_LOG_WARNINGS = false
 
 export namespace Server {
   const log = Log.create({ service: "server" })
+  const csp =
+    "default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; style-src 'self' 'unsafe-inline'; img-src 'self' data: https:; font-src 'self' data:; media-src 'self' data:; connect-src 'self' data:"
+  const embeddedUIPromise = Flag.OPENCODE_DISABLE_EMBEDDED_WEB_UI
+    ? Promise.resolve(null)
+    : // @ts-expect-error - generated file at build time
+      import("opencode-web-ui.gen.ts").then((module) => module.default as Record<string, string>).catch(() => null)
 
   export const Default = lazy(() => createApp({}))
 
@@ -497,7 +503,22 @@ export namespace Server {
         },
       )
       .all("/*", async (c) => {
+        const embeddedWebUI = await embeddedUIPromise
         const path = c.req.path
+
+        if (embeddedWebUI) {
+          const match = embeddedWebUI[path.replace(/^\//, "")] ?? embeddedWebUI["index.html"] ?? null
+          if (!match) return c.json({ error: "Not Found" }, 404)
+          const file = Bun.file(match)
+          if (await file.exists()) {
+            c.header("Content-Type", file.type)
+            if (file.type.startsWith("text/html")) {
+              c.header("Content-Security-Policy", csp)
+            }
+            return c.body(await file.arrayBuffer())
+          }
+          return c.json({ error: "Not Found" }, 404)
+        }
 
         const response = await proxy(`https://app.opencode.ai${path}`, {
           ...c.req,
@@ -506,10 +527,7 @@ export namespace Server {
             host: "app.opencode.ai",
           },
         })
-        response.headers.set(
-          "Content-Security-Policy",
-          "default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; style-src 'self' 'unsafe-inline'; img-src 'self' data: https:; font-src 'self' data:; media-src 'self' data:; connect-src 'self' data:",
-        )
+        response.headers.set("Content-Security-Policy", csp)
         return response
       })
   }
